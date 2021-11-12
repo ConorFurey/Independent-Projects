@@ -1,0 +1,592 @@
+---
+title: "Assignment 5"
+author: Conor Furey
+date: "Fall 2021"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      error = FALSE)
+## load packages in this chunk here using library() 
+## Best to load ALL necessary packages in this chunk
+## so they are all loaded at the beginning
+
+library(tidyverse)
+library(readr)
+library(tidymodels)
+library(recipes)
+library(rsample)
+library(yardstick)
+library(coefplot)
+library(parsnip)
+library(workflows)
+
+knitr::opts_knit$set(root.dir = "~/Desktop/Columbia Sports Management/Baseball Analytics/Ex_Files_Learning_R/Exercise Files")
+
+##
+```
+
+
+## Question 1
+
+Read in data from the American Community Survey (ACS), stored at <https://www.jaredlander.com/data/acs_ny.csv> . Use base R's `read.csv()` to read in the data, and then change it to a tibble after reading it in.
+
+```{r q1-0-load-data}
+
+ACS <-read.csv('acs_ny.csv')
+
+```
+
+Estimate a **ridge** model of `FamilyIncome` from the ACS data.
+
+### 1.1: Prep the data
+
+Split the data into training and testing sets, with 80% of the data in the training set.
+
+```{r q1-1-split-data}
+
+ACS %>% head(10)
+
+ACS_split <- initial_split(ACS, prop = 0.8)
+
+train <- training(ACS_split)
+test <- testing(ACS_split)
+
+```
+
+Extract the training and testing data into variables for later use.
+
+```{r q1-1-extract-train-and-test-data}
+
+train1 <- train %>% 
+  select('FamilyIncome','FamilyType','NumChildren','NumVehicles',
+           'NumWorkers','HeatingFuel','Insurance','Language')
+
+test1 <- test %>% 
+  select('FamilyIncome','FamilyType','NumChildren','NumVehicles',
+           'NumWorkers','HeatingFuel','Insurance','Language')
+
+```
+
+Next, use functions in the `recipes` package to prep your data.
+
+- Omit `FoodStamp` as a predictor so that it is absent from the model.
+- Set all nominal predictors to be turned into dummy variables.
+- Normalize all numeric predictors.
+
+```{r q1-1-prep-data}
+
+rec_famincome <- recipe(FamilyIncome ~ .,
+                        data=train1) %>% 
+    step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+    step_normalize(all_numeric_predictors()) 
+
+```
+
+### 1.2: Fit the model
+
+*Fit the model:* Fit the model using functions from the `tidymodels` packages. Set `glmnet` as your model engine. Set `penalty` to 0, the lowest possible value, and set `mixture` to the correct value to run a pure ridge regression.
+
+```{r q1-2-set-model}
+
+library(parsnip)
+library(glmnet)
+library(tune)
+
+fit_fi <- linear_reg(penalty = 0, mixture = 0)%>% 
+  set_engine('glmnet')
+
+```
+
+Set up the workflow.
+
+```{r q-1-2-set-workflow}
+
+library(workflows)
+
+flow_1 <- workflow() %>% 
+  add_recipe(rec_famincome) %>% 
+  add_model(fit_fi)
+flow_1
+
+
+```
+
+Fit the model workflow on the training data.
+
+```{r q1-2-fit-model}
+
+train1 %>% 
+  head(10)
+
+mod1 <- fit(flow_1, data=train1)
+
+```
+
+### 1.3: Explore the model
+
+Extract the underlying model object.
+
+```{r q1-3-extract-model}
+
+mod1$fit
+
+```
+
+Plot a coefficient plot of the model, with the coefficients sorted by magnitude.
+
+```{r q1-3-coefplot}
+
+tidy(mod1) %>% print(n=30)
+
+mod1 %>% 
+  extract_model() %>% 
+  coefplot(sort='magnitude')
+
+```
+
+Write 2-3 sentences identifying the 3 strongest predictors (excluding the intercept) and interpreting why those predictors might predict family income.
+
+Apart from the intercept (which tells us family income begins around $110k before adding in the variable of this formula), the 3 strongest predictors of family income in my model are the presence of an insurance plan, the number of workers within the household, and the number of vehicles within the household. Two of these predictors make intuitive sense on an affordability basis (the former and latter), while the number of workers logically correlates with more contribution toward family income.
+
+## Question 2
+
+Estimate a **lasso** model of `FamilyIncome` in the same ACS dataset, this time using *tuning* and *cross-validation* to choose model parameter values.
+
+### 2.1: Prep the data
+
+Prepare a cross-validation spec with 8 folds for the training data that you extracted for Question 1.
+
+```{r q2-1-set-cv}
+
+spec2 <- vfold_cv(data=train1, v=8, strata='FamilyType')
+
+```
+
+### 2.2: Fit the model
+
+Set up the model with `glmnet` as your model engine, with the correct setting of the `mixture` parameter to run *lasso* regression instead of *ridge* regression. This time, set the `penalty` parameter to be tuned using `tune()` to find the optimal penalty value for model complexity.
+
+```{r q2-2-set-model}
+
+fit2 <- linear_reg(penalty = tune(), mixture=1)%>% 
+  set_engine('glmnet')
+
+```
+
+Set up a tuning grid of 50 random possible parameter values of `penalty`.
+
+```{r q2-2-set-tuning-grid}
+
+parameters2 <- fit2 %>% parameters()
+  
+grid2 <- grid_random(parameters2, size = 50)
+grid2 %>% 
+  head(10)
+
+```
+
+Set up `rmse` and `mae` as the evaluation metrics, to tune parameter values based on which one minimizes root-mean-squared error or median absolute error.
+
+```{r q2-2-set-tuning-metrics}
+
+metrics2 <- metric_set(rmse, mae)
+
+```
+
+Set up the workflow by updating the workflow from question 1 to use the new model object for Question 2, but retaining the preprocessing recipe that you prepped for Question 1.
+
+```{r q-2-2-update-workflow}
+
+flow2 <- workflow() %>% 
+  add_recipe(rec_famincome) %>% 
+  add_model(fit2)
+
+
+```
+
+Fit the grid of models on the cross-validation set you specified in 2.1 on the training data.
+
+```{r q2-2-fit-model-grid}
+
+cv2 <- tune_grid(
+  flow2,
+  resamples = spec2,
+  grid = grid2,
+  metrics = metrics2,
+  control = control_grid(verbose = TRUE),
+) %>% 
+  head(10)
+
+```
+
+### 2.3: Explore the model
+
+Select the model with the "absolute best" penalty based on RMSE.
+
+```{r q2-3-penalty-best-rmse}
+
+cv2 %>% select_best(metric = 'rmse')
+
+```
+Select the model with the "absolute best" penalty based on MAE.
+
+```{r q2-3-penalty-best-mae}
+
+metrics2
+
+cv2 %>% select_best(metric = 'mae')
+
+```
+
+Identify whether the same penalty value is the best according to RMSE as according to MAE.
+
+Yes — here, my code returned the same penalty values for both selecting for best penalty based off the metric of root mean squared error as it was for mean absolute error. In both cases, I received a penalty of 3.332102e-10. 
+
+Finalize the workflow using the best model by RMSE, fit the final model, and extract the resulting `glmnet` model object.
+
+```{r q2-3-finalize-extract}
+
+mod2 <- 
+  finalize_workflow(
+    flow2,
+    parameters = cv2 %>% select_best(metric = 'rmse')
+  )
+
+mod2$fit
+
+mod2_obj <- fit(mod2, data=train1)
+
+tidy(mod2_obj)
+
+```
+
+Plot a multiplot of the coefficients of the final ridge model from Q1 and the best-by-RMSE lasso model that you just extracted. Sort the coefficients by magnitude.
+
+```{r q2-3-multiplot}
+
+multi2 <- mod2_obj %>% 
+  extract_model() 
+multi1 <- mod1 %>% 
+  extract_model()
+
+multiplot(multi1, multi2, sort = 'magnitude', 
+          secret.weapon = TRUE,
+          coefficients = 'Insurance')
+```
+
+Write 2-3 sentences explaining why the coefficients differ between these models.
+
+While bias can help us generalize the data better and make the model less sensitive to single data points... it can also harm the accuracy / integrity of our conclusions. Here we are underfitting our variables in the case of penalties of 0 (ridge) and -0.000000003332102 (lasso) to reduce variance and extract discernible conclusions. Where our ridge regression never penalized/reduced a variable's coefficient to 0 (merely reducing the model's complexity), the lasso regression assigned more (the most) weight to the insurance variable after eliminating variables without impact, such as Language_English, HeatingFuel_Solar and _Oil, and FamilyType_Male.Head.
+
+## Question 3
+
+Estimate an *elastic net* model of `FamilyIncome` in the same ACS dataset, using *tuning* and *cross-validation*. An elastic net model is a blend of a pure lasso and pure ridge model. In this question, you will tune the `mixture` parameter to adjust the amount of "lasso-ness" vs. "ridge-ness" in the model.
+
+### 3.1: Fit the model
+
+Set up the `glmnet` model, setting both the `penalty` and `mixture` parameters to be tuned using `tune()`.
+
+```{r q3-1-set-model}
+
+fit3 <- linear_reg(penalty = tune(), mixture=tune()) %>% 
+  set_engine('glmnet')
+
+```
+
+Set up a tuning grid of 100 random parameter combinations of `penalty` and `mixture`.
+
+```{r q3-1-set-tuning-grid}
+
+parameters3 <- fit3 %>% parameters()
+
+grid3 <- grid_random(parameters3, size = 100)
+
+```
+
+Set up `rmse` as the evaluation metric, to tune parameter values based on which one minimizes root-mean-squared error.
+
+```{r q3-1-set-tuning-metrics}
+
+metrics3 <- metric_set(rmse)
+
+```
+
+Set up the workflow by updating the workflow from Question 1 to use the new model object for Question 3, but retaining the preprocessing recipe that you prepped for Question 1.
+
+```{r q-3-1-update-workflow}
+
+flow3 <- workflow() %>% 
+  add_recipe(rec_famincome) %>% 
+  add_model(fit3)
+
+```
+
+Fit the grid of models on the cross-validation set previously specified on the training data in Question 2.
+
+```{r q3-1-fit-model-grid}
+
+cv3 <- tune_grid(
+  flow3,
+  resamples = spec2,
+  grid = grid3,
+  metrics = metrics3,
+  control = control_grid(verbose = TRUE),
+) %>% 
+  head(10)
+
+
+```
+
+### 3.2: Explore the model
+
+Show the best 5 models by RMSE.
+
+```{r q3-2-show-best-rmse}
+
+cv3 %>% show_best(n=5)
+
+```
+
+Finalize the workflow using the best model by RMSE, fit the final model, and extract the resulting `glmnet` model object.
+
+```{r q3-2-finalize-extract}
+
+mod3 <- 
+  finalize_workflow(
+    flow3,
+    parameters = cv3 %>% select_best(metric = 'rmse')
+  )
+
+mod3_obj <- fit(mod3, data=train1)
+
+```
+
+Show a coefficient plot with the coefficients sorted by magnitude.
+
+```{r q3-2-coefplot}
+
+mod3_obj %>% 
+  extract_model() %>% 
+  coefplot(sort='magnitude')
+
+```
+
+Write 2-3 sentences describing whether the best elastic net model is more like a lasso or a ridge regression, and what information you used to arrive at that answer.
+
+I think the  best elastic net model performs more like a lasso regression due to the fact that the resulting model reduced its complexity to only contains 10 variables, after we began with 21 (as the ridge regression ended up with). Elastic net seems to remove some of the reliance (bias) on particular variables like heating fuel and language, helping assign more value to variables capable of telling a more meaningful story like insurance (+) and wood heating fuel (-). Simply put, the elastic net is also more like a lasso model because mixture from show_best() is closer to 1 than 0.
+
+## Question 4
+
+Read in the 2015 NFL Play-by-Play data from <https://www.jaredlander.com/data/pbp-2015.csv> and fit a model to predict whether a given play is a rush or pass play (`PlayType`).
+
+```{r q4-0-read-data}
+
+PlayData <-read_csv('https://www.jaredlander.com/data/pbp-2015.csv')
+PlayData %>% 
+  head(10)
+
+```
+
+### 4.1: Prep the data
+
+Filter the data to include plays from just one `OffenseTeam` (of your choice), where `PlayType` is either "RUSH" or "PASS".
+
+```{r q4-1-filter-data}
+
+PlayData <- PlayData %>% 
+  filter(OffenseTeam=='PHI',
+         PlayType=='RUSH' | PlayType=='PASS')
+
+```
+
+Split the data into training and testing sets, with 75% of the data in the training set. Stratify the sets by `PlayType` so that the proportions are balanced in both sets.
+
+```{r q4-1-split-data}
+
+NFL_split <- initial_split(PlayData, prop = 0.75, strata = 'PlayType')
+
+train4a <- training(NFL_split)
+test4a <- testing(NFL_split)
+
+```
+
+Extract the training and testing data into variables for later use.
+
+```{r q4-1-extract-train-and-test-data}
+
+train4b <- train4a %>% 
+  select('PlayType','Quarter','Minute',
+         'Down','ToGo','YardLineFixed','DefenseTeam','SeriesFirstDown',
+         'IsTouchdown','Yards', 'Formation')
+
+train4b %>% 
+  head(10)
+
+test4b <- test4a %>% 
+  select('PlayType','Quarter','Minute',
+         'Down','ToGo','YardLineFixed','DefenseTeam','SeriesFirstDown',
+         'IsTouchdown','Yards', 'Formation')
+
+```
+
+Prepare a cross-validation spec for the training data with 10 folds, again stratifying each fold by `PlayType`.
+
+```{r q4-1-set-cv}
+
+cv_split4 <- vfold_cv(data=train4b, v=10, strata='PlayType')
+
+```
+
+Prepare a model recipe predicting whether `PlayType` is "PASS" or "RUSH" based on the following *specific* predictors:
+
+`Quarter`: Quarter of game (1-4) `Minute`: Minutes remaining in the quarter (15-0) `DefenseTeam`: The opposing team on defense `Down`: 1st, 2nd, 3rd, or 4th `ToGo`: Yards to go to make the down `YardLineFixed`: Starting yard line for that down
+
+After you set the formula, set data preprocessing using `recipes` and `themis` steps:
+
+-   Change `PlayType` from string to factor to prepare for logistic regression
+-   Downsample the data by `PlayType`
+-   Dummy-code all nominal predictors, *not* using one-hot encoding
+
+```{r q4-1-set-recipe}
+
+rec_Eagles <- recipe(PlayType ~ Quarter+Minute+DefenseTeam+Down+ToGo+YardLineFixed,
+              data=train4b) %>% 
+  step_string2factor(PlayType) %>% 
+  themis::step_downsample (PlayType) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_dummy(all_nominal_predictors())
+  
+
+```
+
+### 4.2: Fit the model
+
+Set up the logistic regression model with `glmnet` as your model engine. Set both the `penalty` and `mixture` parameters to be tuned to run an elastic net regression with the ideal penalty value for model complexity.
+
+```{r q4-2-set-model}
+
+spec_Eagles <- logistic_reg(penalty = tune(), mixture=tune()) %>% 
+  set_engine('glmnet')
+
+```
+
+Set up a tuning grid to select a regular 10x10 grid of possible parameters.
+
+```{r q4-2-set-tuning-grid}
+
+
+parameters4 <- spec_Eagles %>% parameters()
+  
+grid4 <- grid_regular(parameters4, levels = 10)
+grid4
+
+```
+
+Set up tuning metrics using `mn_log_loss` to evaluate the models based on log-loss (lower is better!).
+
+```{r q4-2-set-tuning-metrics}
+
+metrics4 <- metric_set(mn_log_loss)
+metrics4
+
+```
+
+Prep the workflow.
+
+```{r q-4-2-set-workflow}
+
+flow_4 <- workflow() %>% 
+  add_recipe(rec_Eagles) %>% 
+  add_model(spec_Eagles)
+
+```
+
+Fit the grid of models on the cross-validation set specified on the training data.
+
+```{r q4-2-fit-model-grid}
+
+cv4 <- tune_grid(
+  flow_4,
+  resamples = cv_split4,
+  grid = grid4,
+  metrics = metrics4,
+  control = control_grid(verbose = TRUE),
+) %>% 
+  head(10)
+
+
+```
+
+Finalize the workflow, selecting the best model based on `mn_log_loss`. Then, use `last_fit()` to fit that workflow's model *on the original train-test split object.* `last_fit()` will fit the model to the training data and then evaluate predictions on the testing data.
+
+```{r q4-2-finalize-model}
+
+cv4 %>% select_best()
+#penalty= 0.005994843
+#mixture: 1
+#.config: Preprocessor1_Model098
+
+mod4 <- 
+  finalize_workflow(
+    flow_4,
+    parameters = cv4 %>% select_best()
+  )
+mod4
+
+results4 <- last_fit(mod4, NFL_split, metrics4)
+
+```
+
+### 4.3: Explore the model
+
+Extract the `glmnet` model object for the final model and plot a coefficient plot, with the coefficients sorted by magnitude.
+
+```{r q4-3-extract-coefplot}
+
+fit4 <- fit(mod4, data=train4b)
+
+fit4 %>% 
+  extract_model() %>% 
+  coefplot(sort='magnitude')
+
+```
+
+Write 2-3 sentences identifying the 3 strongest predictors (excluding the intercept) and interpreting why those predictors might predict the probability that a play is a RUSH instead of a PASS.
+
+My three strongest predictors — the defensive teams of the NY Jets, NE Patriots, and CAR Panthers —  fall under the category of extremely strong teams, in which case the Eagles would almost certainly be passing the ball (to catch up quickly) if behind in the game or running the ball (Panthers, Patriots games)) if ahead early in the game (vs. Jets). Coming in 5th place, `yard line fixed` makes sense as a *relatively* strong predictor due to teams' decision-making traditionally being largely influenced by field positioning and relation to the first-down marker. 
+
+(The [tidymodels.org example of model tuning](https://www.tidymodels.org/start/tuning/#final-model) will help you with the next few prompts.)
+
+Report the final tested model's rush/pass play classification accuracy using `collect_metrics()`.
+
+```{r q4-3-collect-metrics}
+
+results4 %>% 
+  collect_metrics()
+
+```
+
+In 1-2 sentences, explain whether the model appears to be performing above or below chance, and how you can tell.
+
+The model appears to perform slightly above chance — the Eagles passed 58.5% of their 2015 offensive plays (I could be right 117/200 times if I guess pass every play) and this model predicts an accuracy of 60.9% in choosing the correct play. 
+
+Plot an ROC curve of the model's performance on the held-out test data where the `truth` is `PlayType` (which contains the actual rush/pass play type), and where the class probability column is the predicted probability that the play is a PASS based on the model.
+
+```{r q4-3-plot-roc-curve}
+
+results4 %>%
+  collect_predictions() 
+
+results4 %>%
+  collect_predictions() %>% 
+  roc_curve(PlayType, .pred_PASS) %>% 
+  autoplot()
+
+```
+
+If you previously identified that the model classifies plays above chance, then this plot should have the ROC curve going *above* the dotted identity line on the graph where sensitivity = 1 - specificity.
